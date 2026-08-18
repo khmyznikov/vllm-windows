@@ -31,6 +31,11 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+option(VLLM_BUILD_DEEPGEMM "Build and package DeepGEMM" ON)
+option(VLLM_BUILD_QUTLASS "Build and package QUTLASS" ON)
+option(VLLM_BUILD_FLASHMLA "Build and package FlashMLA" ON)
+option(VLLM_BUILD_FMHA_SM100 "Package FMHA SM100 sources" ON)
+option(VLLM_BUILD_TML_FA4 "Package TileLang FA4 sources" ON)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -820,12 +825,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
+     AND SCALED_MM_ARCHS)
     set(SCALED_MM_SM120_SRCS
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c3x_sm120.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm120_fp8.cu"
-      "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_blockwise_sm120_fp8.cu"
     )
+    if(NOT (WIN32 AND
+       CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$"))
+      list(APPEND SCALED_MM_SM120_SRCS
+        "csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_blockwise_sm120_fp8.cu")
+    endif()
     set_gencode_flags_for_srcs(
       SRCS "${SCALED_MM_SM120_SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -994,20 +1004,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_SM120_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
+     AND FP4_SM120_ARCHS)
     set(FP4_SM120_SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
       "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
+    if(NOT (WIN32 AND
+       CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$"))
+      list(APPEND FP4_SM120_SRCS
+        "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
+    endif()
     set_gencode_flags_for_srcs(
       SRCS "${FP4_SM120_SRCS}"
       CUDA_ARCHS "${FP4_SM120_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${FP4_SM120_SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building SM12x NVFP4 for archs: ${FP4_SM120_ARCHS}")
   else()
     message(STATUS "Not building SM12x NVFP4 as no compatible archs were found.")
@@ -1120,6 +1135,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   message(STATUS "Enabling C_stable extension.")
   list(REMOVE_DUPLICATES VLLM_STABLE_EXT_SRC)
+  if(VLLM_GPU_LANG STREQUAL "CUDA" AND WIN32
+     AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+    file(TO_CMAKE_PATH "$ENV{CUDA_PATH}/lib/arm64" VLLM_CUDA_LIBRARY_DIR)
+    set(_CUBLAS_LIBRARY "${VLLM_CUDA_LIBRARY_DIR}/cublas.lib")
+    set(CUDA_cublas_LIBRARY "${_CUBLAS_LIBRARY}" CACHE FILEPATH "" FORCE)
+    foreach(CUDA_TARGET_LIBRARY cublas cublasLt)
+      if(TARGET CUDA::${CUDA_TARGET_LIBRARY})
+        set_target_properties(CUDA::${CUDA_TARGET_LIBRARY} PROPERTIES
+          IMPORTED_LOCATION "${VLLM_CUDA_LIBRARY_DIR}/${CUDA_TARGET_LIBRARY}.lib")
+      endif()
+    endforeach()
+  endif()
   if (DEFINED _CUBLAS_LIBRARY)
     define_extension_target(
       _C_stable_libtorch
@@ -1454,11 +1481,21 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
+  if(VLLM_BUILD_DEEPGEMM)
     include(cmake/external_projects/deepgemm.cmake)
+  endif()
+  if(VLLM_BUILD_FMHA_SM100)
     include(cmake/external_projects/fmha_sm100.cmake)
+  endif()
+  if(VLLM_BUILD_FLASHMLA)
     include(cmake/external_projects/flashmla.cmake)
+  endif()
+  if(VLLM_BUILD_QUTLASS)
     include(cmake/external_projects/qutlass.cmake)
+  endif()
+  if(VLLM_BUILD_TML_FA4)
     include(cmake/external_projects/tml_fa4.cmake)
+  endif()
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
